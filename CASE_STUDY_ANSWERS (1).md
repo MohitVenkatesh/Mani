@@ -66,34 +66,120 @@ Build structured Gold models with required application/loan attributes, dates, a
 
  19. Secure Data Sharing
 Expose only approved Gold views through Snowflake Secure Data Sharing, grant read-only access, minimize PII, and monitor access. Sharing can provide access without copying the underlying data. Any identifiable information must be justified and formally authorized.
+1. Designing a Snowflake Secure Data Share for Gold Regulatory Reporting Data
+Goal: Share the Gold regulatory reporting data with external federal auditors securely without physically moving or copying the data.
 
- 20. Airflow orchestration
+How Snowflake Secure Data Sharing works:
+
+Data resides in your Snowflake account (the "provider").
+You create a secure share object that exposes certain databases, schemas, tables, or views.
+The consumer (external auditors) can query this data live from their own Snowflake account without data duplication.
+Sharing is controlled and can be revoked anytime.
+No data is copied or moved; it's accessed in real-time.
+Steps to design:
+
+Prepare the Gold Data for Sharing:
+
+Create a dedicated schema (e.g., GOLD_REPORTING).
+Put all regulatory reporting tables/views in that schema.
+Ensure data is properly anonymized or masked if needed, as per compliance requirements.
+Use views to provide only the necessary columns, and exclude sensitive or irrelevant fields.
+Create the Secure Share:
+
+In your Snowflake account, create a share, e.g. GOLD_DATA_SHARE.
+Add the GOLD_REPORTING schema (or specific tables/views) to the share.
+Grants: Ensure only SELECT privileges are given, no write access.
+Restrict access to only the federal auditors' Snowflake accounts (identified by their account URL/ID).
+Grant Access:
+
+Share the Snowflake Account Name and share name with auditors.
+They then create a database from your share on their Snowflake account.
+Auditors query data live without you giving your raw data or copying it.
+Audit & Security Controls:
+
+Enable Snowflake’s Access History to monitor who accessed what.
+Set up network policies or IP whitelisting if possible.
+Use masking policies on columns like PII or sensitive financial info.
+Example Conceptual Flow:
+
+
+
+Your Account                  Auditors' Account
+[ GOLD_REPORTING tables ]      
+        |
+        |  CREATE SHARE GOLD_DATA_SHARE; ADD SCHEMA GOLD_REPORTING;
+        |
+  ------------------->  Share Available to Federal Auditors
+                             |
+                  CREATE DATABASE FROM SHARE GOLD_DATA_SHARE;
+                             |
+                    Live querying Gold data without copying
+2. Creating an Interactive Dashboard with Key Loan Metrics
+You want an interactive dashboard with these elements:
+
+Average FICO score of approved loans
+Total loan volume approved vs. declined
+Denial distribution by reason code
+You can create this using Streamlit or Tableau. Since Tableau is widely used in enterprises and good for interactive dashboards, here’s how to conceptualize it:
+
+Dashboard Design:
+Data needed:
+
+Column	Description
+Loan_ID	Unique loan identifier
+Loan_Status	Approved / Declined
+FICO_Score	Numeric FICO score
+Loan_Amount	Amount requested/approved
+Denial_Reason_Code	Code explaining denial
+Key Visualizations:
+
+Average FICO Score of Approved Loans:
+
+Filter loan data where Loan_Status = Approved.
+Calculate the average FICO score and display it as a KPI card or Gauge.
+Total Loan Volume Approved vs. Declined:
+
+Aggregate loan amounts by loan status.
+Show a side-by-side bar chart or pie chart comparing approved and declined volumes.
+Denial Distribution by Reason Code:
+
+Filter only declined loans.
+Count loans per denial reason code.
+Show a bar chart or donut chart of the counts.
+Interactivity ideas:
+
+Filters: Date ranges, loan types, states, or other dimensions.
+Drill down on denial reasons for more detailed analysis.
+Hover tooltips for additional context.
+
+
+ 21. Airflow orchestration
 Create tasks for file/source readiness, application load, credit load, DBT Silver, DBT Gold, tests, and reporting. Set both source-load tasks as upstream dependencies of Silver. Configure retries with backoff, execution timeouts, logging, and failure alerts.
 
- 21. Delayed credit bureau API
+ 22. Delayed credit bureau API
 Allow application data to land in Bronze independently. Airflow waits on a sensor/readiness check for the bureau data. Alert if the delay exceeds the agreed SLA. When the data arrives, match by applicant ID, deduplicate safely, and resume processing. Do not make a final underwriting decision without required credit data.
 
- 22. DBT  Model Failure
+ 23. DBT  Model Failure
 Capture logs and error details, retry transient failures, alert after retries are exhausted, and prevent downstream tasks from running. Correct the cause, rerun the relevant tasks, and verify idempotency and data consistency.
 
- 23. Time Travel audit from 30 days ago
+ 24. Time Travel audit from 30 days ago
 Check the table's configured retention first. If the relevant historical version is still retained, query with `AT (TIMESTAMP => ...)` using the exact approval timestamp and timezone. If retention has expired, use a saved audit snapshot or decision event if available. Do not assume Time Travel retains 30 days unless configured and supported for the table.
 
- 24. 1,000x end-of-quarter spike
+ 25. 1,000x end-of-quarter spike
 Use scalable object storage and Snowpipe/appropriate ingestion, tune Snowflake warehouse sizing and concurrency, process incrementally, and monitor queueing, lag, cost, and failures. Load test peak volumes. Make ingestion and transformation idempotent and ensure source joins and regulatory outputs remain correct under parallel load.
 
- 25. Terraform
+ 26. Terraform
 Use Terraform to provision supported Snowflake databases, schemas, warehouses, roles, and grants. Keep dev/test/prod separated, use version control and pull-request review, run `terraform plan` before apply, and manage credentials through an approved secrets mechanism rather than hardcoding them.
 
- 26. Monitoring
+ 27. Monitoring
 Track file arrival, ingestion lag, row counts, rejected rows, schema changes, DBT tests, Airflow status, query duration, warehouse usage, decision volumes, average FICO of approved loans, and decline reasons. Alert on failed tasks, stale sources, unusual rejection rates, and cost/performance thresholds.
 
- 27. CI/CD
+ 28. CI/CD
 Store DBT and Terraform code in Git. Pull requests trigger linting, compilation, tests, and infrastructure plans. After approval, deploy to the correct environment, run post-deployment checks, and restrict production privileges.
 
- 28. Dashboard
+ 29. Dashboard
 Build a Streamlit or Tableau dashboard showing average FICO for approved loans, approved versus declined application counts/volume, decline reason distribution, approval trends, technical rejections, and data freshness. Source metrics from Gold tables and avoid exposing unnecessary PII.
 
- 29. Slow DBT model
+ 30. Slow DBT model
 Inspect the Snowflake query profile for large scans, expensive joins, skew, spills, and queuing. Check filters and incremental logic, review warehouse size/concurrency, and compare runtime, cost, and result correctness after optimization.
 Data Engineering Case Study — Mortgage Application & Underwriting Pipeline.
