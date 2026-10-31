@@ -1,0 +1,196 @@
+1. Source Code/Scripts
+Data Simulation Script: Generates sample application data, credit score, and financial data.
+import random
+import pandas as pd
+from datetime import datetime, timedelta
+
+def generate_applications(num=1000):
+    data = []
+    base_date = datetime.now() - timedelta(days=30)
+    for i in range(num):
+        app_date = base_date + timedelta(minutes=random.randint(0, 43200))
+        data.append({
+            'application_id': i + 1,
+            'applicant_name': f'Applicant_{i+1}',
+            'application_date': app_date,
+            'income': random.randint(30000, 150000),
+            'loan_amount': random.randint(5000, 50000)
+        })
+    return pd.DataFrame(data)
+
+def generate_credit_scores(num=1000):
+    data = []
+    base_date = datetime.now() - timedelta(days=29)
+    for i in range(num):
+        score_date = base_date + timedelta(minutes=random.randint(0, 43200))
+        data.append({
+            'application_id': i + 1,
+            'credit_score': random.randint(300, 850),
+            'score_date': score_date
+        })
+    return pd.DataFrame(data)
+
+# Save CSV for ingestion
+applications = generate_applications()
+credit_scores = generate_credit_scores()
+applications.to_csv('applications.csv', index=False)
+credit_scores.to_csv('credit_scores.csv', index=False)
+
+Sample dbt Model SQL (Bronze to Silver layer example):
+
+-- models/silver_applications.sql
+with bronze_apps as (
+    select * from {{ ref('bronze_applications') }}
+),
+bronze_scores as (
+    select * from {{ ref('bronze_credit_scores') }}
+)
+
+select 
+    a.application_id,
+    a.applicant_name,
+    a.application_date,
+    a.income,
+    a.loan_amount,
+    c.credit_score,
+    c.score_date
+from bronze_apps a
+left join bronze_scores c
+    on a.application_id = c.application_id
+    and c.score_date >= a.application_date
+
+3.Orchestration-
+
+from airflow import DAG
+from airflow.operators.bash_operator import BashOperator
+from datetime import datetime, timedelta
+
+default_args = {
+    'owner': 'data_team',
+    'start_date': datetime(2026, 10, 1),
+    'retry_delay': timedelta(minutes=5),
+}
+
+with DAG('pipeline_orchestration', schedule_interval='@hourly', default_args=default_args, catchup=False) as dag:
+    fetch_credit_scores = BashOperator(
+        task_id='fetch_credit_scores',
+        bash_command='python fetch_credit_scores.py'
+    )
+    run_dbt_models = BashOperator(
+        task_id='run_dbt',
+        bash_command='dbt run'
+    )
+    fetch_credit_scores >> run_dbt_models
+
+4.Terraform (IaC) Code for Snowflake Setup
+Here’s what the Terraform would cover conceptually (details depend on your environment):
+
+Create Snowflake databases for Bronze, Silver, Gold layers.
+Create schemas per environment.
+Create virtual warehouses with auto-scaling.
+Define roles and permissions with PII data controls using RBAC.
+Example Terraform resource blocks:
+
+resource "snowflake_database" "bronze" {
+  name = "BRONZE_DB"
+  comment = "Bronze layer database for raw data"
+}
+
+resource "snowflake_schema" "bronze_applications" {
+  name     = "APPLICATIONS"
+  database = snowflake_database.bronze.name
+}
+
+resource "snowflake_warehouse" "processing_wh" {
+  name             = "PROCESSING_WH"
+  warehouse_size   = "XSMALL"
+  auto_suspend     = 300
+  auto_resume      = true
+  initially_suspended = true
+}
+
+resource "snowflake_role" "pii_reader" {
+  name = "PII_READER"
+}
+
+resource "snowflake_role_grants" "pii_grants" {
+  role_name = snowflake_role.pii_reader.name
+  database_name = snowflake_database.bronze.name
+  privileges = ["USAGE", "SELECT"]
+  with_grant_option = false
+}
+
+resource "snowflake_masking_policy" "pii_masking" {
+  name       = "MASK_SSN"
+  database   = snowflake_database.bronze.name
+  schema     = snowflake_schema.bronze_applications.name
+  expression = "CASE WHEN CURRENT_ROLE() IN ('PII_READER', 'SYSADMIN') THEN ssn ELSE 'XXX-XX-XXXX' END"
+}
+
+3. Documentation
+a. High-Level Architecture Diagram (Bronze-Silver-Gold Flow)
+
+
+[Source Systems]
+     |
+     v
+[Bronze Layer]
+(Raw ingested data - applications, credit bureau, transactions)
+     |
+     v
+[Silver Layer]
+(Cleansed, joined, and enriched datasets with calculated fields)
+     |
+     v
+[Gold Layer]
+(Business-level aggregates - LTV, DTI, approved applicants report)
+     |
+     v
+[BI/Analytics Tools, ML Models, Reporting]
+
+b. LTV and DTI Calculation Logic Description
+Loan-to-Value (LTV):
+
+LTV measures the loan amount against the value of the collateral (home/property).
+
+Formula:
+LTV = (Loan Amount) / (Property Value)
+Debt-to-Income (DTI):
+
+DTI measures total monthly debt payments against monthly gross income.
+
+Formula:
+DTI = (Total Monthly Debt Payments) / (Gross Monthly Income)
+Debt payments include loan payments, credit card minimums, etc., which are summed and divided by income.
+
+4. Design Answers
+a. Handling delayed credit bureau API data
+If credit score data arrives later than application data, design a process to:
+
+Ingest application data immediately into Bronze and Silver layers.
+Implement incremental updates or joins in the Silver layer to enrich existing records when credit data arrives.
+Use a watermark or status flag to track applications missing scores and backfill when data arrives.
+Consider event-driven orchestration or retries to ensure credit scores are eventually matched.
+b. Leveraging Snowflake’s Time Travel for auditing
+Snowflake’s Time Travel allows querying historical data at a specific timestamp:
+
+Use SELECT ... FROM table AT (TIMESTAMP => '2026-09-30 12:34:56') to view the applicant’s financial profile as it was at approval time.
+This helps verify the exact data state at approval and supports compliance and audit requirements.
+c. Scalability in end-of-quarter rush with 1000x submission spike
+To handle spikes:
+
+Use Snowflake’s multi-cluster warehouses to automatically scale compute resources based on workload.
+Employ stream/batch processing to ingest data in near real-time without bottlenecks.
+Decouple ingestion from transformations; load raw data quickly, then transform asynchronously.
+Use orchestration tools to prioritize critical pipelines and increase concurrency limits temporarily.
+
+
+
+
+
+
+
+
+
+
+
