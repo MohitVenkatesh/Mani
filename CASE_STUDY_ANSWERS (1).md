@@ -1,4 +1,7 @@
 CASE STUDY SOLUTION ﻿along with End-to-end architecture for Mortgage Application & Underwriting Pipeline case study, using Snowflake, DBT, Apache Airflow, and Terraform.
+
+I  would design the mortgage underwriting pipeline using a Snowflake-based Medallion Architecture. Snowpipe handles ingestion, dbt manages transformations, and Airflow orchestrates dependencies. The Bronze layer stores raw source data, Silver performs cleansing, deduplication, validation, and PII protection, and Gold calculates LTV and DTI and generates underwriting decisions. I also considered Snowflake RBAC, dynamic masking, dbt data quality tests, and Terraform for infrastructure provisioning.
+
 [Source Systems]
      |
      v
@@ -16,6 +19,231 @@ CASE STUDY SOLUTION ﻿along with End-to-end architecture for Mortgage Applicati
      v
 [BI/Analytics Tools, ML Models, Reporting]
 
+To Ingest Snowflake Data-
+
+I would land the JSON files in cloud object storage, such as Amazon S3, and use a Snowflake stage with COPY INTO for batch ingestion or Snowpipe for continuous ingestion.
+
+The steps are:
+1. Receive the JSON files and validate file arrival.
+2. Create a Snowflake stage and file format.
+3. Load the records into a Bronze table, preserving the raw payload in a VARIANT column.
+4. Extract fields and flatten nested arrays when needed.
+5. Apply schema validation, null checks, deduplication, and data quality rules in dbt.
+6. Load validated records into Silver tables.
+CREATE OR REPLACE FILE FORMAT mortgage_json_format
+  TYPE = JSON
+  STRIP_OUTER_ARRAY = TRUE;
+
+CREATE OR REPLACE TABLE bronze_mortgage_applications (
+    raw_data VARIANT,
+    ingestion_timestamp TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+);
+
+I would create a CSV file format, configure the stage, and load the data into a raw Bronze table.
+CREATE OR REPLACE FILE FORMAT credit_csv_format
+  TYPE = CSV
+  SKIP_HEADER = 1
+  FIELD_OPTIONALLY_ENCLOSED_BY = '"';
+
+CREATE OR REPLACE TABLE bronze_credit_bureau (
+    applicant_id VARCHAR,
+    ssn VARCHAR,
+    fico_score NUMBER,
+    monthly_debt NUMBER(12,2),
+    ingestion_timestamp TIMESTAMP_NTZ
+);
+To handle Nested JSON and Parsing-
+
+SELECT
+    raw_data:applicant_id::VARCHAR AS applicant_id,
+    raw_data:loan_amount::NUMBER(12,2) AS loan_amount,
+    raw_data:property_value::NUMBER(12,2) AS property_value
+FROM bronze_mortgage_applications;
+
+Biquery Data Ingestion
+
+SELECT
+  JSON_VALUE(payload, '$.applicant_id') AS applicant_id,
+  SAFE_CAST(
+    JSON_VALUE(payload, '$.loan_amount') AS NUMERIC
+  ) AS loan_amount
+FROM `project.dataset.mortgage_applications`;
+
+SQL and Underwriting Business Rules-
+FOR CALCULATING LTV-
+SELECT
+    applicant_id,
+    loan_amount,
+    property_value,
+    ROUND(loan_amount / NULLIF(property_value, 0) * 100, 2) AS ltv,
+    CASE
+        WHEN property_value IS NULL OR property_value <= 0
+            THEN 'TECHNICAL_REJECTION'
+        WHEN loan_amount / property_value > 0.95
+            THEN 'DECLINED_LTV_EXCEEDED'
+        ELSE 'PASS'
+    END AS ltv_status
+FROM silver_mortgage_applications;
+
+FOR CALCULATING DTI-
+
+SELECT
+    applicant_id,
+    monthly_debt,
+    monthly_gross_income,
+    ROUND(
+        monthly_debt / NULLIF(monthly_gross_income, 0) * 100, 2
+    ) AS dti
+FROM silver_mortgage_applications;
+
+TO COMPUTE BOTH LTV & DTI-
+
+WITH metrics AS (
+    SELECT
+        applicant_id,
+        loan_amount,
+        property_value,
+        monthly_debt,
+        monthly_gross_income,
+        fico_score,
+        loan_amount / NULLIF(property_value, 0) * 100 AS ltv,
+        monthly_debt / NULLIF(monthly_gross_income, 0) * 100 AS dti
+    FROM silver_mortgage_applications
+),
+decisions AS (
+    SELECT *,
+        CASE
+            WHEN property_value IS NULL OR property_value <= 0
+                THEN 'TECHNICAL_REJECTION'
+            WHEN monthly_gross_income IS NULL
+                 OR monthly_gross_income <= 0
+                THEN 'TECHNICAL_REJECTION'
+            WHEN fico_score IS NULL
+                THEN 'TECHNICAL_REJECTION'
+            WHEN ltv > 95
+                THEN 'DECLINED_LTV_EXCEEDED'
+            WHEN dti > 43
+                THEN 'DECLINED_DTI_EXCEEDED'
+            WHEN fico_score < 620
+                THEN 'DECLINED_LOW_CREDIT_SCORE'
+            WHEN fico_score BETWEEN 620 AND 660
+                 AND dti BETWEEN 36 AND 43
+                THEN 'REQUIRES_CO_SIGNER'
+            ELSE 'APPROVED'
+        END AS decision_reason
+    FROM metrics
+)
+SELECT *
+FROM decisions;
+
+HANDLE DUPLICATE RECORDS-
+SELECT *
+FROM bronze_credit_bureau
+QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY applicant_id
+    ORDER BY ingestion_timestamp DESC
+) = 1;
+
+JOIN MORTGAGE APPLICATION WITH CREDIT BUREAU DATA-
+SELECT
+    a.applicant_id,
+    a.loan_amount,
+    a.property_value,
+    a.monthly_gross_income,
+    c.fico_score,
+    c.monthly_debt
+FROM bronze_mortgage_applications a
+LEFT JOIN bronze_credit_bureau c
+    ON a.applicant_id = c.applicant_id;
+
+    DBT PROJECT STRUCTURE-
+
+    models/
+├── staging/
+│   ├── stg_mortgage_applications.sql
+│   ├── stg_credit_bureau.sql
+│   └── sources.yml
+├── intermediate/
+│   └── int_applicant_financial_profile.sql
+└── marts/
+    ├── fct_underwriting_decisions.sql
+    ├── fct_technical_rejections.sql
+    └── hmda_reporting.sql
+
+    DBT TESTS TO BE IMPLEMENTED-
+
+    models:
+  - name: fct_underwriting_decisions
+    columns:
+      - name: applicant_id
+        data_tests:
+          - not_null
+      - name: decision_reason
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - APPROVED
+                  - REQUIRES_CO_SIGNER
+                  - DECLINED_LTV_EXCEEDED
+                  - DECLINED_DTI_EXCEEDED
+                  - DECLINED_LOW_CREDIT_SCORE
+                  - TECHNICAL_REJECTION
+
+            MASKING RULES LOGIC-
+1.CREATE OR REPLACE MASKING POLICY ssn_mask
+AS (val VARCHAR) RETURNS VARCHAR ->
+    CASE
+        WHEN IS_ROLE_IN_SESSION('COMPLIANCE_OFFICER')
+            THEN val
+        ELSE 'XXX-XX-' || RIGHT(val, 4)
+    END;
+       
+APPLY POLICY
+ALTER TABLE silver_mortgage_applications
+MODIFY COLUMN ssn
+SET MASKING POLICY ssn_mask;
+
+AIRFLOW ORCHESTRATION-
+Start DAG
+Task A
+
+Load mortgage JSON
+
+
+Task B
+
+Load credit CSV
+
+
+
+Both succeed → Run dbt Silver
+Run dbt Gold and quality tests
+Publish results and monitor status
+
+TIMETRAVEL-
+SELECT *
+FROM silver_mortgage_applications
+AT (
+    TIMESTAMP =>
+        '2026-09-29 10:30:00'::TIMESTAMP_NTZ
+)
+WHERE applicant_id = 'APP123';
+
+To handle a 1,000x spike in mortgage applications over a weekend?
+Answer:
+
+I would design the pipeline for elastic ingestion, parallel processing, and controlled concurrency.
+1. Use cloud object storage and Snowpipe or other suitable ingestion mechanisms to absorb incoming files.
+2. Scale Snowflake virtual warehouses according to workload, using auto-scaling or multi-cluster warehouses where appropriate.
+3. Use incremental dbt models to avoid repeatedly processing all historical records.
+4. Partition workloads logically by ingestion date or another suitable processing key, without creating unnecessary small tasks.
+5. Monitor queueing, warehouse utilization, query latency, ingestion lag, and failure rates.
+6. Configure retry policies and idempotent processing so that retries do not duplicate decisions.
+7. Load-test the system against expected peak volumes and establish capacity and cost alerts.
+8. 
+DETAILED DESCRIPTION-
 1.Components for Mortgage Application & Underwriting Pipeline case study, using Snowflake, DBT, Apache Airflow, and Terraform are-
   Data sources: Mortgage application JSON files and credit bureau CSV files.
   Ingestion: Load data into Snowflake using stages, COPY INTO, or Snowpipe.
