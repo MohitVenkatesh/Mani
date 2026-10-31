@@ -1,4 +1,20 @@
 CASE STUDY SOLUTION ﻿along with End-to-end architecture for Mortgage Application & Underwriting Pipeline case study, using Snowflake, DBT, Apache Airflow, and Terraform.
+[Source Systems]
+     |
+     v
+[Bronze Layer]
+(Raw ingested data - applications, credit bureau, transactions)
+     |
+     v
+[Silver Layer]
+(Cleansed, joined, and enriched datasets with calculated fields)
+     |
+     v
+[Gold Layer]
+(Business-level aggregates - LTV, DTI, approved applicants report)
+     |
+     v
+[BI/Analytics Tools, ML Models, Reporting]
 
 1.Components for Mortgage Application & Underwriting Pipeline case study, using Snowflake, DBT, Apache Airflow, and Terraform are-
   Data sources: Mortgage application JSON files and credit bureau CSV files.
