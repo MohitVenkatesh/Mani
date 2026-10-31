@@ -1,0 +1,50 @@
+from datetime import datetime, timedelta
+from airflow import DAG
+from airflow.operators.bash import BashOperator
+from airflow.sensors.sql import SqlSensor
+
+# Configure a Snowflake SQL connection named `snowflake_default` in Airflow.
+# In production, make the landing tasks perform/verify actual COPY or Snowpipe loads.
+default_args = {
+    "owner": "data-engineering",
+    "retries": 2,
+    "retry_delay": timedelta(minutes=5),
+}
+
+with DAG(
+    dag_id="mortgage_underwriting_pipeline",
+    start_date=datetime(2026, 1, 1),
+    schedule="@hourly",
+    catchup=False,
+    default_args=default_args,
+    max_active_runs=1,
+    tags=["mortgage", "snowflake", "dbt"],
+) as dag:
+
+    # These sensors ensure that both source tables have at least one record.
+    # Replace the predicates with batch_id / ingestion_date checks for production.
+    wait_for_applications = SqlSensor(
+        task_id="wait_for_application_data",
+        conn_id="snowflake_default",
+        sql="SELECT COUNT(*) > 0 FROM MORTGAGE_DB.BRONZE.RAW_APPLICATIONS",
+        mode="reschedule",
+        poke_interval=60,
+        timeout=60 * 60 * 4,
+    )
+
+    wait_for_credit = SqlSensor(
+        task_id="wait_for_credit_bureau_data",
+        conn_id="snowflake_default",
+        sql="SELECT COUNT(*) > 0 FROM MORTGAGE_DB.BRONZE.RAW_CREDIT_BUREAU",
+        mode="reschedule",
+        poke_interval=60,
+        timeout=60 * 60 * 4,
+    )
+
+    run_dbt = BashOperator(
+        task_id="run_dbt_models_and_tests",
+        bash_command="cd /opt/airflow/dbt && dbt run && dbt test",
+    )
+
+    [wait_for_applications, wait_for_credit] >> run_dbt
+
